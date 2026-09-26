@@ -9,6 +9,7 @@ let deferPlan = null; // 当前顺延预演结果
 let deferStale = false; // 提示单发生增删改后，旧预演失效（确认时服务端也会再核对版本）
 let rehearsal = null; // 当前排练视图（GET /api/rehearsal 的 rehearsal；null 表示无进行中排练）
 let rehEditing = null; // 勘误中的单元格 { cueId, field: 'start'|'end', draft }；null 表示未在勘误
+let withdrawPlan = null; // 当前撤回结束登记预演结果（确认时携带其 baseVersion 由服务端核对）
 let gapResult = null; // 当前共同空档查询结果
 let gapStale = false; // 提示单发生增删改后，旧查询结果失效（再次查询即使用新计划）
 let gapChecked = null; // 已勾选的通道名集合；null 表示尚未初始化（首次渲染默认全选）
@@ -51,6 +52,7 @@ async function api(method, url, body) {
     const e = new Error(msg);
     e.errors = errors;
     e.status = res.status;
+    e.code = data && data.error && data.error.code;
     throw e;
   }
   return data;
@@ -1124,6 +1126,7 @@ function renderRehearsal() {
   const active = $('#rehActive');
   if (!rehearsal) {
     rehEditing = null;
+    clearWithdraw(); // 无活动排练：撤回预演一并收起
     idle.hidden = false;
     active.hidden = true;
     renderDeviation(); // 无排练：拆解区显示空态
@@ -1163,7 +1166,12 @@ function renderRehearsal() {
 
     const actTd = el('td');
     if (it.status === 'done') {
-      actTd.append(el('span', 'rel-muted', '—'));
+      // 已完成提示：可预演「撤回结束登记」（改回进行中并清除因此失效的后续登记）
+      const btn = el('button', 'btn small ghost', '↩️ 撤回结束');
+      btn.type = 'button';
+      btn.title = '预演撤回该提示的实际结束登记：目标改回进行中，并整条清除因此失效的登记（确认前不写入）';
+      btn.addEventListener('click', () => previewWithdrawal(it.cueId));
+      actTd.append(btn);
     } else {
       const kind = it.status === 'pending' ? 'start' : 'end';
       const reasons = at === null
@@ -1312,6 +1320,7 @@ async function startRehearsal() {
     const data = await api('POST', '/api/rehearsal/start');
     rehearsal = data.rehearsal;
     rehEditing = null;
+    clearWithdraw(); // 新一轮排练：旧的撤回预演作废
     hideRehError();
     renderRehearsal();
     showBanner('已开始排练：当前提示单与重算计划已冻结', 'ok');
@@ -1332,6 +1341,7 @@ async function rehearsalRecord(kind, cueId) {
     const data = await api('POST', `/api/rehearsal/records/${kind}`, { cueId, at });
     rehearsal = data.rehearsal;
     rehEditing = null; // 记录已变化，进行中的勘误草稿作废
+    clearWithdraw(); // 记录已变化，撤回预演所依据的版本失效
     hideRehError();
     renderRehearsal();
     showBanner(kind === 'start' ? '已登记实际开始' : '已登记实际结束', 'ok');
@@ -1359,6 +1369,7 @@ async function correctRehearsalRecord(cueId, field, rawValue) {
     const data = await api('POST', '/api/rehearsal/records/correct', { cueId, field, value: n });
     rehearsal = data.rehearsal;
     rehEditing = null;
+    clearWithdraw(); // 记录已变化，撤回预演所依据的版本失效
     hideRehError();
     renderRehearsal();
     showBanner('已勘误登记时间，排练视图已刷新', 'ok');
@@ -1374,12 +1385,146 @@ async function correctRehearsalRecord(cueId, field, rawValue) {
   }
 }
 
+// ---------------- 撤回结束登记（预演只读；确认携带排练记录版本，服务端核对后原子保存） ----------------
+function showWithdrawError(messages) {
+  const panel = $('#rehWithdrawPanel');
+  panel.hidden = false;
+  $('#rehWithdrawResult').hidden = true;
+  const box = $('#rehWithdrawError');
+  box.className = 'banner err';
+  box.innerHTML = '';
+  box.append(el('strong', null, '无法预演撤回结束登记：'));
+  const ul = el('ul');
+  ul.style.margin = '6px 0 0';
+  ul.style.paddingLeft = '18px';
+  for (const m of [].concat(messages)) ul.append(el('li', null, m));
+  box.append(ul);
+  box.classList.remove('hidden');
+  panel.scrollIntoView({ behavior: 'smooth', block: 'start' });
+}
+
+function clearWithdraw() {
+  withdrawPlan = null;
+  $('#rehWithdrawPanel').hidden = true;
+  $('#rehWithdrawResult').hidden = true;
+  $('#rehWithdrawError').classList.add('hidden');
+}
+
+function renderWithdraw() {
+  const panel = $('#rehWithdrawPanel');
+  panel.hidden = false;
+  $('#rehWithdrawError').classList.add('hidden');
+  $('#rehWithdrawResult').hidden = false;
+
+  const meta = $('#rehWithdrawMeta');
+  meta.className = 'frag-meta ok';
+  meta.textContent =
+    `目标「${withdrawPlan.name}」（${withdrawPlan.channel}）：撤回实际结束 ${fmtNum(withdrawPlan.withdrawnEnd)}s，` +
+    `改回进行中（自 ${fmtNum(withdrawPlan.actualStart)}s 起开放占用本通道）` +
+    `｜将整条清除 ${withdrawPlan.clearedCount} 条失效登记` +
+    `｜确认后才会写入，原提示单不变`;
+
+  const none = $('#rehWithdrawNone');
+  const head = $('#rehWithdrawClearedH');
+  const wrap = $('#rehWithdrawTableWrap');
+  const tbody = $('#rehWithdrawTbody');
+  tbody.innerHTML = '';
+  if (!withdrawPlan.cleared.length) {
+    none.hidden = false;
+    head.hidden = true;
+    wrap.hidden = true;
+  } else {
+    none.hidden = true;
+    head.hidden = false;
+    wrap.hidden = false;
+    for (const cl of withdrawPlan.cleared) {
+      const tr = el('tr');
+      tr.append(el('td', 'name-cell', cl.name));
+      tr.append(el('td', null, cl.channel));
+      tr.append(el('td', 'num', fmtNum(cl.actualStart)));
+      tr.append(el('td', 'num', fmtNum(cl.actualEnd)));
+      const reasonTd = el('td');
+      const ul = el('ul', 'reh-reasons');
+      for (const r of cl.reasons) ul.append(el('li', null, r));
+      reasonTd.append(ul);
+      tr.append(reasonTd);
+      tbody.append(tr);
+    }
+  }
+
+  $('#rehWithdrawConfirmBtn').disabled = false;
+  panel.scrollIntoView({ behavior: 'smooth', block: 'start' });
+}
+
+async function previewWithdrawal(cueId) {
+  try {
+    withdrawPlan = await api('POST', '/api/rehearsal/withdrawals/preview', { cueId });
+    renderWithdraw();
+  } catch (err) {
+    withdrawPlan = null;
+    // 可能被服务端权威校验拒绝（如无活动排练、目标未完成或状态已变化），重新拉取最新排练视图
+    try {
+      const fresh = await api('GET', '/api/rehearsal');
+      rehearsal = fresh.rehearsal;
+      renderRehearsal();
+    } catch (_) { /* 忽略刷新失败 */ }
+    if (rehearsal) {
+      showWithdrawError(err.errors || [err.message]);
+    } else {
+      // 无活动排练：撤回预演面板随操作区一起隐藏，改用排练台错误条明确报错
+      showRehError(err.errors || [err.message]);
+    }
+  }
+}
+
+async function confirmWithdrawal() {
+  if (!withdrawPlan) return;
+  const btn = $('#rehWithdrawConfirmBtn');
+  btn.disabled = true;
+  try {
+    const data = await api('POST', '/api/rehearsal/withdrawals/confirm', {
+      cueId: withdrawPlan.cueId,
+      baseVersion: withdrawPlan.baseVersion,
+    });
+    rehearsal = data.rehearsal;
+    rehEditing = null; // 记录已变化，进行中的勘误草稿作废
+    clearWithdraw();
+    hideRehError();
+    renderRehearsal();
+    showBanner('已撤回结束登记：目标改回进行中，失效登记已整条清除', 'ok');
+  } catch (err) {
+    // 记录可能已被他处改变，重新拉取最新排练视图
+    try {
+      const fresh = await api('GET', '/api/rehearsal');
+      rehearsal = fresh.rehearsal;
+    } catch (_) { /* 忽略刷新失败 */ }
+    renderRehearsal();
+    if (err.status === 409 && err.code === 'version_mismatch') {
+      // 排练记录在预演后已变化：本次确认被拒绝，要求重新预演
+      showBanner('排练记录已变化，预演失效，请重新预演', 'err');
+      if (rehearsal) {
+        const meta = $('#rehWithdrawMeta');
+        meta.className = 'frag-meta stale';
+        meta.textContent = '排练登记在预演后已变化，本次确认被拒绝，请重新对该提示发起撤回预演。';
+        $('#rehWithdrawConfirmBtn').disabled = true;
+      }
+    } else if (rehearsal) {
+      showWithdrawError(err.errors || [err.message]);
+      btn.disabled = false;
+    } else {
+      // 无活动排练：撤回预演面板随操作区一起隐藏，改用排练台错误条明确报错
+      showRehError(err.errors || [err.message]);
+    }
+  }
+}
+
 async function resetRehearsal() {
   if (!confirm('确定重置本次排练？\n将清除全部实际登记记录并允许开启新一轮排练（原提示单不受影响）。')) return;
   try {
     await api('POST', '/api/rehearsal/reset');
     rehearsal = null;
     rehEditing = null;
+    clearWithdraw();
     hideRehError();
     renderRehearsal();
     showBanner('已重置，可开始新一轮排练', 'ok');
@@ -1401,6 +1546,8 @@ $('#deferConfirmBtn').addEventListener('click', confirmDeferral);
 $('#deferCancelBtn').addEventListener('click', () => clearDefer());
 $('#rehStartBtn').addEventListener('click', startRehearsal);
 $('#rehResetBtn').addEventListener('click', resetRehearsal);
+$('#rehWithdrawConfirmBtn').addEventListener('click', confirmWithdrawal);
+$('#rehWithdrawCancelBtn').addEventListener('click', () => clearWithdraw());
 $('#rehClock').addEventListener('input', () => {
   if (rehearsal) renderRehearsal();
 });

@@ -9,6 +9,7 @@ const { buildFragment } = require('./fragment');
 const { cuesVersion, planDeferral } = require('./defer');
 const { findCommonGaps } = require('./gap');
 const { createRehearsal, checkStart, checkEnd, checkCorrection, rehearsalView } = require('./rehearsal');
+const { rehearsalVersion, planWithdrawal } = require('./withdraw');
 
 const PORT = parseInt(process.env.PORT, 10) || 3000;
 const DATA_FILE = process.env.DATA_FILE || path.join(__dirname, '..', 'data', 'cues.json');
@@ -333,6 +334,55 @@ app.post('/api/rehearsal/records/correct', (req, res) => {
 
   rehearsalStore.persist(); // 原子写入（临时文件 + rename）
   res.json({ ok: true, rehearsal: rehearsalView(rehearsal) });
+});
+
+// ---- 已完成提示的「撤回结束登记」（预演只读；确认核对排练记录版本，一致才原子保存）----
+
+app.post('/api/rehearsal/withdrawals/preview', (req, res) => {
+  const rehearsal = rehearsalStore.rehearsal;
+  if (!rehearsal) {
+    return fail(res, 409, '当前没有进行中的排练，请先「开始排练」', { code: 'no_active' });
+  }
+  const body = req.body || {};
+  const cueId = typeof body.cueId === 'string' ? body.cueId.trim() : '';
+  if (!cueId) return fail(res, 400, '缺少要撤回结束登记的提示 cueId');
+  try {
+    const plan = planWithdrawal(rehearsal, cueId);
+    const { nextRecords, ...preview } = plan; // nextRecords 仅供确认时应用，预演响应不返回
+    res.json(preview);
+  } catch (e) {
+    return fail(res, e.status || 400, e.message, { code: e.code, errors: e.errors || [e.message] });
+  }
+});
+
+app.post('/api/rehearsal/withdrawals/confirm', (req, res) => {
+  const rehearsal = rehearsalStore.rehearsal;
+  if (!rehearsal) {
+    return fail(res, 409, '当前没有进行中的排练，请先「开始排练」', { code: 'no_active' });
+  }
+  const body = req.body || {};
+  const cueId = typeof body.cueId === 'string' ? body.cueId.trim() : '';
+  if (!cueId) return fail(res, 400, '缺少要撤回结束登记的提示 cueId');
+
+  // 核对预演所依据的排练记录版本：已变化则拒绝并要求重新预演
+  if (typeof body.baseVersion !== 'string' || body.baseVersion !== rehearsalVersion(rehearsal)) {
+    return fail(res, 409, '排练登记在预演后已发生变化，预演结果失效，请重新预演', {
+      code: 'version_mismatch',
+    });
+  }
+
+  // 版本一致 ⇒ 记录与预演时完全相同，重算同一计划再应用
+  let plan;
+  try {
+    plan = planWithdrawal(rehearsal, cueId);
+  } catch (e) {
+    return fail(res, e.status || 400, e.message, { code: e.code, errors: e.errors || [e.message] });
+  }
+
+  rehearsal.records = plan.nextRecords; // 目标改回进行中 + 失效登记整条清除
+  rehearsalStore.persist(); // 原子写入（临时文件 + rename）
+  const { nextRecords, ...applied } = plan;
+  res.json({ ok: true, withdrawn: applied, rehearsal: rehearsalView(rehearsal) });
 });
 
 app.post('/api/rehearsal/reset', (req, res) => {
