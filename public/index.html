@@ -61,9 +61,42 @@
           不早于本通道最后一次实际结束；登记「结束」的秒数不得早于其实际开始。偏差为实际 − 计划（+ 表示晚了，− 表示早了）。<br />
           已登记的实际开始 / 结束可点击该行的 ✏️ <strong>勘误</strong>为非负秒数（未登记字段不能借此补录或清空）：
           提交时服务端基于冻结提示单与全部当前记录重新校验 —— 结束不早于开始、开始满足固定起点或前置实际结束 + 延迟、
-          同通道已开始区间互不重叠（进行中视为开放区间，首尾相接允许）；任一记录失效会列出涉及提示与原因并整次拒绝。
+          同通道已开始区间互不重叠（进行中视为开放区间，首尾相接允许）；任一记录失效会列出涉及提示与原因并整次拒绝。<br />
+          已完成提示可点击该行的 ↩️ <strong>撤回结束</strong>：预演把目标改回进行中（仅撤回实际结束），并沿相对依赖反复传播，
+          整条清除因前置实际结束缺失、或与目标开放的通道占用重叠而失效的登记；确认时服务端核对排练记录版本并重算，
+          版本已变化则拒绝，需重新预演。
         </p>
       </div>
+
+      <section class="frag-subpanel" id="undoPanel" hidden>
+        <h3 class="frag-h3">↩️ 撤回结束登记预演（确认前不会写入）</h3>
+        <p class="hint">
+          预演先把目标提示<strong>改回进行中</strong>（仅撤回其实际结束，保留实际开始），再依据本次冻结提示单
+          <strong>反复传播</strong>清除失效登记，直至剩余记录全部有效：前置实际结束缺失（沿相对依赖逐轮传播）、
+          或与目标开放的通道占用重叠（同通道、左闭右开，首尾相接不算）的提示将被<strong>整条清除</strong>
+          （实际开始与结束一并移除）。确认时服务端核对排练记录版本并重算，版本已变化则拒绝，需重新预演；
+          原提示单不受影响。
+        </p>
+        <div id="undoResult" hidden>
+          <div class="frag-meta ok" id="undoMeta"></div>
+          <h3 class="frag-h3" id="undoClearedTitle"></h3>
+          <p class="hint" id="undoNone" hidden>无其他受影响的登记：仅目标改回进行中，其余登记全部保持有效。</p>
+          <div class="table-wrap" id="undoTableWrap" hidden>
+            <table id="undoTable">
+              <thead>
+                <tr>
+                  <th>#</th><th>名称</th><th>独占通道</th><th>实际开始(s)</th><th>实际结束(s)</th><th>传播轮次</th><th>清除原因</th>
+                </tr>
+              </thead>
+              <tbody id="undoTbody"></tbody>
+            </table>
+          </div>
+          <div class="form-actions">
+            <button type="button" class="btn primary" id="undoConfirmBtn">确认撤回并保存</button>
+            <button type="button" class="btn ghost" id="undoCancelBtn">取消预演</button>
+          </div>
+        </div>
+      </section>
 
       <section class="frag-subpanel" id="devPanel">
         <h3 class="frag-h3">🧭 起点偏差拆解（只读）</h3>

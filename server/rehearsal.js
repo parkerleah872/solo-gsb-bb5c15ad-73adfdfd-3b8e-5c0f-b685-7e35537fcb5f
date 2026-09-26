@@ -36,6 +36,14 @@ const REASON_TEXT = {
   'dep-cycle': '其前置处于循环依赖中',
 };
 
+/** 排练记录版本：排练 id + 全部登记记录的哈希；任何登记变化（含重置 / 开启新排练）都会改变它 */
+function recordsVersion(rehearsal) {
+  return crypto
+    .createHash('sha256')
+    .update(JSON.stringify({ id: rehearsal.id, records: rehearsal.records }))
+    .digest('hex');
+}
+
 function recOf(rehearsal, cueId) {
   const rec = rehearsal.records[cueId];
   if (!rec) return { actualStart: null, actualEnd: null };
@@ -313,6 +321,7 @@ function rehearsalView(rehearsal) {
     id: rehearsal.id,
     startedAt: rehearsal.startedAt,
     cuesVersion: rehearsal.cuesVersion,
+    recordsVersion: recordsVersion(rehearsal), // 供撤回结束预演等功能做客户端失效预判
     cues: rehearsal.cues,
     schedule: rehearsal.schedule,
     records: rehearsal.records,
@@ -322,4 +331,12 @@ function rehearsalView(rehearsal) {
   };
 }
 
-module.exports = { createRehearsal, checkStart, checkEnd, checkCorrection, validateRecords, rehearsalView };
+module.exports = {
+  createRehearsal,
+  checkStart,
+  checkEnd,
+  checkCorrection,
+  validateRecords,
+  rehearsalView,
+  recordsVersion,
+};

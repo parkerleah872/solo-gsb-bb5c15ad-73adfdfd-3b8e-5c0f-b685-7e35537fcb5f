@@ -8,7 +8,8 @@ const { evaluate, validateCueBody, round } = require('./scheduler');
 const { buildFragment } = require('./fragment');
 const { cuesVersion, planDeferral } = require('./defer');
 const { findCommonGaps } = require('./gap');
-const { createRehearsal, checkStart, checkEnd, checkCorrection, rehearsalView } = require('./rehearsal');
+const { createRehearsal, checkStart, checkEnd, checkCorrection, rehearsalView, recordsVersion } = require('./rehearsal');
+const { planUndoEnd } = require('./undo');
 
 const PORT = parseInt(process.env.PORT, 10) || 3000;
 const DATA_FILE = process.env.DATA_FILE || path.join(__dirname, '..', 'data', 'cues.json');
@@ -340,6 +341,55 @@ app.post('/api/rehearsal/reset', (req, res) => {
   rehearsalStore.rehearsal = null;
   rehearsalStore.persist();
   res.json({ ok: true, rehearsal: null });
+});
+
+// ---- 撤回结束登记（预演只读；确认时核对排练记录版本，一致才原子保存）----
+
+app.post('/api/rehearsal/undo-end/preview', (req, res) => {
+  const rehearsal = rehearsalStore.rehearsal;
+  if (!rehearsal) {
+    return fail(res, 409, '当前没有进行中的排练，请先「开始排练」', { code: 'no_active' });
+  }
+  const body = req.body || {};
+  const cueId = typeof body.cueId === 'string' ? body.cueId.trim() : '';
+  if (!cueId) return fail(res, 400, '缺少要撤回结束登记的提示 cueId');
+  try {
+    res.json(planUndoEnd(rehearsal, cueId));
+  } catch (e) {
+    return fail(res, e.status || 400, e.message, { errors: e.errors || [e.message] });
+  }
+});
+
+app.post('/api/rehearsal/undo-end/confirm', (req, res) => {
+  const rehearsal = rehearsalStore.rehearsal;
+  if (!rehearsal) {
+    return fail(res, 409, '当前没有进行中的排练，请先「开始排练」', { code: 'no_active' });
+  }
+  const body = req.body || {};
+  const cueId = typeof body.cueId === 'string' ? body.cueId.trim() : '';
+  if (!cueId) return fail(res, 400, '缺少要撤回结束登记的提示 cueId');
+
+  // 重新核对预演所依据的排练记录版本：已变化则拒绝并要求重新预演
+  if (typeof body.baseVersion !== 'string' || body.baseVersion !== recordsVersion(rehearsal)) {
+    return fail(res, 409, '排练登记在预演后已发生变化，预演结果失效，请重新预演', {
+      code: 'version_mismatch',
+    });
+  }
+
+  // 版本一致 ⇒ 登记与预演时完全相同，重算同一计划再应用
+  let plan;
+  try {
+    plan = planUndoEnd(rehearsal, cueId);
+  } catch (e) {
+    return fail(res, e.status || 400, e.message, { errors: e.errors || [e.message] });
+  }
+
+  // 目标改回进行中（仅撤回实际结束，保留实际开始）；失效提示的整条登记清除
+  rehearsal.records[cueId] = { actualStart: plan.target.actualStart, actualEnd: null };
+  for (const cl of plan.cleared) delete rehearsal.records[cl.cueId];
+
+  rehearsalStore.persist(); // 原子写入（临时文件 + rename）
+  res.json({ ok: true, applied: plan, rehearsal: rehearsalView(rehearsal) });
 });
 
 app.use((err, req, res, next) => {

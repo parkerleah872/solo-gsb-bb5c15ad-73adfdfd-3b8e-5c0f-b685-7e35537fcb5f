@@ -9,6 +9,8 @@ let deferPlan = null; // 当前顺延预演结果
 let deferStale = false; // 提示单发生增删改后，旧预演失效（确认时服务端也会再核对版本）
 let rehearsal = null; // 当前排练视图（GET /api/rehearsal 的 rehearsal；null 表示无进行中排练）
 let rehEditing = null; // 勘误中的单元格 { cueId, field: 'start'|'end', draft }；null 表示未在勘误
+let undoPlan = null; // 当前撤回结束登记预演结果
+let undoStale = false; // 排练登记在预演后已变化，旧预演失效（确认时服务端也会再核对排练记录版本）
 let gapResult = null; // 当前共同空档查询结果
 let gapStale = false; // 提示单发生增删改后，旧查询结果失效（再次查询即使用新计划）
 let gapChecked = null; // 已勾选的通道名集合；null 表示尚未初始化（首次渲染默认全选）
@@ -51,6 +53,7 @@ async function api(method, url, body) {
     const e = new Error(msg);
     e.errors = errors;
     e.status = res.status;
+    e.code = data && data.error && data.error.code;
     throw e;
   }
   return data;
@@ -1124,6 +1127,7 @@ function renderRehearsal() {
   const active = $('#rehActive');
   if (!rehearsal) {
     rehEditing = null;
+    clearUndo();
     idle.hidden = false;
     active.hidden = true;
     renderDeviation(); // 无排练：拆解区显示空态
@@ -1131,6 +1135,9 @@ function renderRehearsal() {
   }
   idle.hidden = true;
   active.hidden = false;
+
+  // 排练视图刷新后核对撤回预演所依据的排练记录版本，已变化则标记失效
+  if (undoPlan && rehearsal.recordsVersion !== undoPlan.baseVersion) markUndoStale();
 
   const c = rehearsal.counts;
   $('#rehMeta').textContent =
@@ -1163,7 +1170,12 @@ function renderRehearsal() {
 
     const actTd = el('td');
     if (it.status === 'done') {
-      actTd.append(el('span', 'rel-muted', '—'));
+      const undoBtn = el('button', 'btn small danger', '↩️ 撤回结束');
+      undoBtn.type = 'button';
+      undoBtn.title =
+        '预演撤回该提示的实际结束登记：目标改回进行中，因前置实际结束缺失或与目标开放的通道占用重叠而失效的登记将整条清除（确认前不写入）';
+      undoBtn.addEventListener('click', () => previewUndoEnd(it.cueId));
+      actTd.append(undoBtn);
     } else {
       const kind = it.status === 'pending' ? 'start' : 'end';
       const reasons = at === null
@@ -1388,6 +1400,119 @@ async function resetRehearsal() {
   }
 }
 
+// ---------------- 撤回结束登记（预演只读；确认时服务端核对排练记录版本并重算） ----------------
+function clearUndo() {
+  undoPlan = null;
+  undoStale = false;
+  $('#undoPanel').hidden = true;
+  $('#undoResult').hidden = true;
+}
+
+function markUndoStale() {
+  if (!undoPlan || undoStale) return;
+  undoStale = true;
+  $('#undoConfirmBtn').disabled = true;
+  const meta = $('#undoMeta');
+  if (meta) {
+    meta.classList.add('stale');
+    meta.textContent = '排练登记已变更，本预演已失效，请重新从列表发起「撤回结束」预演。';
+  }
+}
+
+function renderUndo() {
+  const panel = $('#undoPanel');
+  panel.hidden = false;
+  $('#undoResult').hidden = false;
+
+  const t = undoPlan.target;
+  const meta = $('#undoMeta');
+  meta.className = 'frag-meta' + (undoStale ? ' stale' : ' ok');
+  meta.textContent =
+    `「${undoPlan.name}」（${undoPlan.channel}）撤回实际结束 ${fmtNum(t.revokedEnd)}s → 改回进行中` +
+    `（通道自实际开始 ${fmtNum(t.actualStart)}s 起开放占用）` +
+    `｜连带清除登记 ${undoPlan.cleared.length} 条` +
+    (undoStale ? '｜⚠️ 排练登记已变更，预演失效' : '｜确认后才会写入');
+
+  $('#undoClearedTitle').textContent = undoPlan.cleared.length
+    ? `将被整条清除的登记（${undoPlan.cleared.length} 条，按传播轮次列出）`
+    : '将被整条清除的登记';
+  $('#undoNone').hidden = undoPlan.cleared.length > 0;
+  $('#undoTableWrap').hidden = undoPlan.cleared.length === 0;
+
+  const tbody = $('#undoTbody');
+  tbody.innerHTML = '';
+  undoPlan.cleared.forEach((cl, i) => {
+    const tr = el('tr');
+    tr.append(el('td', 'num', String(i + 1)));
+    tr.append(el('td', 'name-cell', cl.name));
+    tr.append(el('td', null, cl.channel));
+    tr.append(el('td', 'num', fmtNum(cl.actualStart)));
+    tr.append(el('td', 'num', fmtNum(cl.actualEnd)));
+    tr.append(el('td', 'num', `第 ${cl.round} 轮`));
+    const reasonTd = el('td', 'undo-reason');
+    const ul = el('ul', 'undo-reasons');
+    for (const r of cl.reasons) ul.append(el('li', null, r));
+    reasonTd.append(ul);
+    tr.append(reasonTd);
+    tbody.append(tr);
+  });
+
+  $('#undoConfirmBtn').disabled = undoStale;
+  panel.scrollIntoView({ behavior: 'smooth', block: 'start' });
+}
+
+async function previewUndoEnd(cueId) {
+  try {
+    undoPlan = await api('POST', '/api/rehearsal/undo-end/preview', { cueId });
+    undoStale = false;
+    hideRehError();
+    renderUndo();
+  } catch (err) {
+    clearUndo();
+    showRehError(err.errors || [err.message]);
+  }
+}
+
+async function confirmUndoEnd() {
+  if (!undoPlan || undoStale) return;
+  const btn = $('#undoConfirmBtn');
+  btn.disabled = true;
+  try {
+    const data = await api('POST', '/api/rehearsal/undo-end/confirm', {
+      cueId: undoPlan.cueId,
+      baseVersion: undoPlan.baseVersion,
+    });
+    rehearsal = data.rehearsal;
+    rehEditing = null; // 记录已变化，进行中的勘误草稿作废
+    clearUndo();
+    hideRehError();
+    renderRehearsal();
+    showBanner(
+      `已撤回结束登记：目标改回进行中，连带清除 ${data.applied.cleared.length} 条失效登记`,
+      'ok'
+    );
+  } catch (err) {
+    if (err.code === 'version_mismatch') {
+      // 排练记录在预演后已变化：标记失效，要求重新预演
+      undoStale = true;
+      $('#undoConfirmBtn').disabled = true;
+      const meta = $('#undoMeta');
+      meta.classList.add('stale');
+      meta.textContent = '排练登记在预演后已变化，本次确认被拒绝，请重新发起「撤回结束」预演。';
+      showRehError(err.errors || [err.message]);
+    } else {
+      showRehError(err.errors || [err.message]);
+      btn.disabled = false;
+      // 状态可能已被他处改变（如目标已被撤回 / 排练已重置），重新拉取最新排练视图
+      try {
+        const fresh = await api('GET', '/api/rehearsal');
+        rehearsal = fresh.rehearsal;
+        renderRehearsal();
+      } catch (_) { /* 忽略刷新失败 */ }
+    }
+  }
+}
+
 // ---------------- 初始化 ----------------
 document.querySelectorAll('input[name="startType"]').forEach((r) =>
   r.addEventListener('change', syncStartBoxes)
@@ -1401,6 +1526,8 @@ $('#deferConfirmBtn').addEventListener('click', confirmDeferral);
 $('#deferCancelBtn').addEventListener('click', () => clearDefer());
 $('#rehStartBtn').addEventListener('click', startRehearsal);
 $('#rehResetBtn').addEventListener('click', resetRehearsal);
+$('#undoConfirmBtn').addEventListener('click', confirmUndoEnd);
+$('#undoCancelBtn').addEventListener('click', () => clearUndo());
 $('#rehClock').addEventListener('input', () => {
   if (rehearsal) renderRehearsal();
 });

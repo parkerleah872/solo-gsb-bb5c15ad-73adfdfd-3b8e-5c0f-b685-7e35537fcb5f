@@ -305,6 +305,17 @@ tr.row-done td { color: #cfcadb; }
 .reh-edit-btn { padding: 1px 6px; margin-left: 6px; font-size: 11px; }
 .reh-edit-input { width: 90px; padding: 4px 6px; font-size: 13px; margin-right: 4px; }
 
+/* ---------- 撤回结束登记预演 ---------- */
+#undoPanel { margin-top: 16px; }
+#undoPanel > .hint { margin-bottom: 10px; }
+#undoResult .form-actions { margin-top: 14px; }
+.undo-reason { white-space: normal; min-width: 260px; }
+.undo-reasons {
+  margin: 0; padding-left: 16px;
+  font-size: 12px; color: #ff9aa6;
+}
+.undo-reasons li { margin: 2px 0; }
+
 /* ---------- 起点偏差拆解（只读） ---------- */
 #devPanel { margin-top: 16px; }
 #devPanel > .hint { margin-bottom: 10px; }
